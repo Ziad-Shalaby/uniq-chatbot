@@ -162,22 +162,23 @@ class RAGEngine:
 
     def _load_llm(self):
         import torch
-        from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+        from transformers import AutoTokenizer, AutoModelForCausalLM
 
         logger.info(f"Loading LLM: {self.model_name} (cpu={self.use_cpu})")
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name, trust_remote_code=True
         )
 
-        if self.use_cpu:
+        if self.use_cpu or not torch.cuda.is_available():
             self.llm = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 torch_dtype=torch.float32,
                 device_map="cpu",
                 trust_remote_code=True,
             )
-        elif self.use_4bit and torch.cuda.is_available():
-            bnb = BitsAndBytesConfig(
+        elif self.use_4bit:
+            from transformers import BitsAndBytesConfig as _BnB
+            bnb = _BnB(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_compute_dtype=torch.float16,
@@ -190,10 +191,9 @@ class RAGEngine:
                 trust_remote_code=True,
             )
         else:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
             self.llm = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                torch_dtype=torch.float16,
                 device_map="auto",
                 trust_remote_code=True,
             )

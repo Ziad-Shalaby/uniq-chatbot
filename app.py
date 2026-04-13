@@ -165,16 +165,21 @@ with st.sidebar:
         help="Qwen2.5-7B موصى به للحصول على أفضل نتائج عربية"
     )
 
+    import torch as _t
+    _has_gpu = _t.cuda.is_available()
+
     use_4bit = st.toggle(
         "تقليل الحجم (4-bit Quantization)",
-        value=True,
-        help="يقلل استهلاك الذاكرة - موصى به للـ GPU بذاكرة أقل من 16GB"
+        value=_has_gpu,
+        disabled=not _has_gpu,
+        help="متاح فقط مع GPU"
     )
 
     use_cpu = st.toggle(
         "استخدام CPU فقط (بدون GPU)",
-        value=False,
-        help="أبطأ لكن يعمل على أي جهاز"
+        value=not _has_gpu,
+        disabled=not _has_gpu,
+        help="يُفعَّل تلقائياً عند غياب GPU"
     )
 
     st.divider()
