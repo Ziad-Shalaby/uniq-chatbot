@@ -165,9 +165,8 @@ with st.sidebar:
                 try:
                     import sys
                     sys.path.insert(0, str(Path(__file__).parent))
-                    os.environ["USE_CPU"] = "1" if use_cpu else "0"
 
-                    engine = load_pipeline("claude-haiku-4-5-20251001", False)
+                    engine = load_pipeline("groq", False)
                     st.session_state.pipeline = engine
                     st.session_state.pipeline_ready = True
 
