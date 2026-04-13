@@ -153,34 +153,8 @@ def load_pipeline(model_name: str, use_4bit: bool):
 with st.sidebar:
     st.markdown("## ⚙️ الإعدادات")
 
-    st.markdown("### 🤖 إعدادات النموذج")
-    model_choice = st.selectbox(
-        "نموذج اللغة",
-        options=[
-            "Qwen/Qwen2.5-7B-Instruct",
-            "Qwen/Qwen2.5-3B-Instruct",
-            "Qwen/Qwen3-8B",
-        ],
-        index=0,
-        help="Qwen2.5-7B موصى به للحصول على أفضل نتائج عربية"
-    )
-
-    import torch as _t
-    _has_gpu = _t.cuda.is_available()
-
-    use_4bit = st.toggle(
-        "تقليل الحجم (4-bit Quantization)",
-        value=_has_gpu,
-        disabled=not _has_gpu,
-        help="متاح فقط مع GPU"
-    )
-
-    use_cpu = st.toggle(
-        "استخدام CPU فقط (بدون GPU)",
-        value=not _has_gpu,
-        disabled=not _has_gpu,
-        help="يُفعَّل تلقائياً عند غياب GPU"
-    )
+    st.markdown("### 🤖 النموذج")
+    st.info("يعمل البوت بواسطة **Groq API** (مجاني) — لا يحتاج GPU.", icon="✅")
 
     st.divider()
 
@@ -193,7 +167,7 @@ with st.sidebar:
                     sys.path.insert(0, str(Path(__file__).parent))
                     os.environ["USE_CPU"] = "1" if use_cpu else "0"
 
-                    engine = load_pipeline(model_choice, use_4bit and not use_cpu)
+                    engine = load_pipeline("claude-haiku-4-5-20251001", False)
                     st.session_state.pipeline = engine
                     st.session_state.pipeline_ready = True
 

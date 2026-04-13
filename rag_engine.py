@@ -1,11 +1,10 @@
 """
 UniQ RAG Engine
 ================
-Self-contained RAG pipeline.
-Runs on:
-  - Local CPU  (slow but works on any machine, use Qwen2.5-3B)
-  - Local GPU  (fast, use Qwen2.5-7B)
-  - Google Colab T4 (use 4-bit + Qwen2.5-7B)
+Uses:
+  - sentence-transformers (multilingual-e5-small) for embeddings (~120MB)
+  - ChromaDB for vector search
+  - Groq API for generation (FREE tier available at console.groq.com)
 """
 
 import os
@@ -13,14 +12,12 @@ import re
 import logging
 import hashlib
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 logger = logging.getLogger("uniq.rag")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 KB_DIR = Path(__file__).parent / "knowledge_base"
-
-# ── Arabic system prompt ──────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """أنت "يونيك بوت" — المساعد الذكي الرسمي لنظام UniQ في كلية الحاسبات وعلوم البيانات، جامعة الإسكندرية.
 
@@ -31,7 +28,7 @@ SYSTEM_PROMPT = """أنت "يونيك بوت" — المساعد الذكي ال
 - تقديم إجابات واضحة ومنظمة
 
 قواعد مهمة:
-1. إذا لم تجد المعلومة في السياق أدناه، قل صراحةً: "لا تتوفر لديّ معلومات كافية حول هذا الموضوع. يُرجى التواصل مع شؤون الطلاب مباشرة."
+1. إذا لم تجد المعلومة في السياق، قل: "لا تتوفر لديّ معلومات كافية. يُرجى التواصل مع شؤون الطلاب مباشرة."
 2. لا تخترع أرقاماً أو نصوصاً غير موجودة في السياق
 3. إذا كان السؤال عن خطوات إجراء، رتبها بشكل واضح
 4. كن مختصراً ومفيداً
@@ -40,34 +37,35 @@ SYSTEM_PROMPT = """أنت "يونيك بوت" — المساعد الذكي ال
 {context}
 """
 
-FALLBACK_AR = "عذراً، لم أجد معلومات كافية في اللائحة للإجابة على سؤالك بدقة. يُرجى التواصل مع مكتب شؤون الطلاب مباشرةً."
+FALLBACK_AR = "عذراً، لم أجد معلومات كافية في اللائحة للإجابة على سؤالك. يُرجى التواصل مع مكتب شؤون الطلاب مباشرةً."
 
 INTENT_MAP = {
-    "withdrawal":    ["سحب القيد", "انسحاب", "withdrawal", "w تقدير"],
-    "add_drop":      ["إضافة", "حذف", "add drop", "تسجيل مادة"],
-    "gpa":           ["معدل", "gpa", "cgpa", "درجات", "حساب المعدل"],
-    "graduation":    ["تخرج", "graduation", "ساعة معتمدة", "شرف", "honors"],
-    "probation":     ["متعثر", "مراقبة", "probation", "فصل", "إنذار"],
-    "attendance":    ["غياب", "مواظبة", "حضور", "attendance", "حرمان"],
-    "registration":  ["تسجيل", "registration", "مقررات", "فصل دراسي"],
-    "payment":       ["مصاريف", "رسوم", "دفع", "payment"],
-    "programs":      ["برنامج", "تخصص", "program", "قسم", "برامج"],
-    "courses":       ["مقرر", "مادة", "course", "ساعات", "كود"],
+    "withdrawal":   ["سحب القيد", "انسحاب", "withdrawal"],
+    "add_drop":     ["إضافة", "حذف", "add drop", "تسجيل مادة"],
+    "gpa":          ["معدل", "gpa", "cgpa", "درجات", "حساب المعدل"],
+    "graduation":   ["تخرج", "graduation", "ساعة معتمدة", "شرف", "honors"],
+    "probation":    ["متعثر", "مراقبة", "probation", "فصل", "إنذار"],
+    "attendance":   ["غياب", "مواظبة", "حضور", "attendance", "حرمان"],
+    "registration": ["تسجيل", "registration", "مقررات", "فصل دراسي"],
+    "programs":     ["برنامج", "تخصص", "program", "قسم"],
+    "courses":      ["مقرر", "مادة", "course", "ساعات"],
 }
 
 SUGGESTED_ACTIONS = {
-    "withdrawal":   ["تقديم طلب انسحاب", "التحدث مع المرشد الأكاديمي"],
-    "add_drop":     ["فتح نموذج الحذف والإضافة", "مراجعة العبء الدراسي"],
-    "gpa":          ["حساب المعدل", "مراجعة كشف الدرجات"],
-    "graduation":   ["مراجعة متطلبات التخرج", "حساب الساعات المتبقية"],
-    "registration": ["الانتقال لصفحة التسجيل", "التواصل مع المرشد الأكاديمي"],
+    "withdrawal":   ["التحدث مع المرشد الأكاديمي"],
+    "add_drop":     ["مراجعة العبء الدراسي"],
+    "gpa":          ["مراجعة كشف الدرجات"],
+    "graduation":   ["مراجعة متطلبات التخرج"],
+    "registration": ["التواصل مع المرشد الأكاديمي"],
 }
+
+# Groq free models (pick best for Arabic)
+GROQ_MODEL = "llama-3.1-8b-instant"   # free, fast, good Arabic support
 
 
 class TextChunker:
-    def __init__(self, chunk_size=800, overlap=100):
+    def __init__(self, chunk_size=800):
         self.chunk_size = chunk_size
-        self.overlap = overlap
 
     def split(self, text: str, metadata: Dict) -> List[Dict]:
         if not text.strip():
@@ -93,39 +91,36 @@ class TextChunker:
             else:
                 if current:
                     chunks.append(current)
-                current = para if len(para) <= self.chunk_size else para[:self.chunk_size]
+                current = para[:self.chunk_size]
         if current:
             chunks.append(current)
         return chunks
 
 
 class RAGEngine:
-    """Complete RAG pipeline: load models → embed docs → query."""
+    """Lightweight RAG: small embedding model + Groq free API for generation."""
 
-    def __init__(self, model_name="Qwen/Qwen2.5-7B-Instruct", use_4bit=True):
-        self.model_name = model_name
-        self.use_4bit = use_4bit
-        self.use_cpu = os.environ.get("USE_CPU", "0") == "1"
+    def __init__(self, model_name=GROQ_MODEL, use_4bit=False):
+        self.groq_model = GROQ_MODEL
         self.embedder = None
         self.vector_store = None
-        self.llm = None
-        self.tokenizer = None
+        self._chroma = None
         self._ready = False
+        self._api_key = os.environ.get("GROQ_API_KEY", "")
 
     def initialize(self):
-        logger.info(f"Initializing RAG engine (model={self.model_name}, 4bit={self.use_4bit}, cpu={self.use_cpu})")
+        logger.info("Initializing RAG engine (Groq free API)")
         self._load_embedder()
         self._load_vector_store()
         self._ingest_knowledge_base()
-        self._load_llm()
         self._ready = True
-        logger.info("✅ RAG engine ready")
+        logger.info("RAG engine ready")
 
     def _load_embedder(self):
         from sentence_transformers import SentenceTransformer
-        logger.info("Loading embedding model...")
-        self.embedder = SentenceTransformer("intfloat/multilingual-e5-large")
-        logger.info("✅ Embedder loaded")
+        logger.info("Loading embedding model (multilingual-e5-small ~120MB)...")
+        self.embedder = SentenceTransformer("intfloat/multilingual-e5-small", device="cpu")
+        logger.info("Embedder loaded")
 
     def _load_vector_store(self):
         import chromadb
@@ -136,72 +131,26 @@ class RAGEngine:
             settings=CS(anonymized_telemetry=False),
         )
         self.vector_store = self._chroma.get_or_create_collection(
-            name="uniq_bylaws",
+            name="uniq_bylaws_v2",
             metadata={"hnsw:space": "cosine"},
         )
-        logger.info(f"✅ Vector store ready ({self.vector_store.count()} chunks)")
+        logger.info(f"Vector store ready ({self.vector_store.count()} chunks)")
 
     def _ingest_knowledge_base(self):
-        """Ingest all documents from knowledge_base/ if not already indexed."""
         if self.vector_store.count() > 0:
-            logger.info(f"Knowledge base already has {self.vector_store.count()} chunks — skipping ingestion")
+            logger.info(f"Already indexed {self.vector_store.count()} chunks — skipping")
             return
-
-        logger.info("Ingesting knowledge base documents...")
+        logger.info("Ingesting knowledge base...")
         total = 0
-        for fpath in KB_DIR.iterdir():
+        for fpath in sorted(KB_DIR.iterdir()):
             if fpath.suffix.lower() in {".pdf", ".txt", ".md"}:
                 try:
                     n = self.ingest_file(str(fpath))
                     total += n
-                    logger.info(f"  ✅ {fpath.name}: {n} chunks")
+                    logger.info(f"  {fpath.name}: {n} chunks")
                 except Exception as e:
-                    logger.warning(f"  ⚠️ Failed to ingest {fpath.name}: {e}")
-
-        logger.info(f"✅ Total chunks ingested: {total}")
-
-    def _load_llm(self):
-        import torch
-        from transformers import AutoTokenizer, AutoModelForCausalLM
-
-        logger.info(f"Loading LLM: {self.model_name} (cpu={self.use_cpu})")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name, trust_remote_code=True
-        )
-
-        if self.use_cpu or not torch.cuda.is_available():
-            self.llm = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                torch_dtype=torch.float32,
-                device_map="cpu",
-                trust_remote_code=True,
-            )
-        elif self.use_4bit:
-            from transformers import BitsAndBytesConfig as _BnB
-            bnb = _BnB(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-            )
-            self.llm = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                quantization_config=bnb,
-                device_map="auto",
-                trust_remote_code=True,
-            )
-        else:
-            self.llm = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                torch_dtype=torch.float16,
-                device_map="auto",
-                trust_remote_code=True,
-            )
-
-        self.llm.eval()
-        logger.info("✅ LLM loaded")
-
-    # ── Query ─────────────────────────────────────────────────────────────────
+                    logger.warning(f"  Failed {fpath.name}: {e}")
+        logger.info(f"Total chunks indexed: {total}")
 
     def query(self, question: str, history: List[Dict] = None) -> Dict[str, Any]:
         intent = self._detect_intent(question)
@@ -209,63 +158,41 @@ class RAGEngine:
         fallback = not sources or sources[0]["score"] < 0.30
 
         if fallback:
-            return {
-                "answer": FALLBACK_AR,
-                "sources": [], "intent": intent,
-                "suggested_actions": SUGGESTED_ACTIONS.get(intent, []),
-                "fallback": True,
-            }
+            return {"answer": FALLBACK_AR, "sources": [], "intent": intent,
+                    "suggested_actions": SUGGESTED_ACTIONS.get(intent, []), "fallback": True}
 
         context = self._build_context(sources)
         answer = self._generate(question, context, history or [])
 
         return {
             "answer": answer,
-            "sources": [
-                {
-                    "title": s.get("title", "اللائحة"),
-                    "content_preview": s["content"][:150],
-                    "score": round(s["score"], 3),
-                    "source": s.get("source", ""),
-                }
-                for s in sources
-            ],
+            "sources": [{"title": s.get("title", "اللائحة"),
+                         "content_preview": s["content"][:150],
+                         "score": round(s["score"], 3),
+                         "source": s.get("source", "")} for s in sources],
             "intent": intent,
             "suggested_actions": SUGGESTED_ACTIONS.get(intent, []),
             "fallback": False,
         }
 
     def _retrieve(self, question: str) -> List[Dict]:
-        emb = self.embedder.encode(
-            f"query: {question}", normalize_embeddings=True
-        ).tolist()
-
+        emb = self.embedder.encode(f"query: {question}", normalize_embeddings=True).tolist()
         count = self.vector_store.count()
         if count == 0:
             return []
-
         results = self.vector_store.query(
-            query_embeddings=[emb],
-            n_results=min(5, count),
+            query_embeddings=[emb], n_results=min(5, count),
             include=["documents", "metadatas", "distances"],
         )
-
         chunks = []
         for doc, meta, dist in zip(
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0],
+            results["documents"][0], results["metadatas"][0], results["distances"][0]
         ):
             score = 1.0 - dist
             if score >= 0.25:
-                chunks.append({
-                    "content": doc,
-                    "title": meta.get("title", "اللائحة"),
-                    "source": meta.get("source", ""),
-                    "score": score,
-                })
-        chunks.sort(key=lambda x: x["score"], reverse=True)
-        return chunks
+                chunks.append({"content": doc, "title": meta.get("title", "اللائحة"),
+                                "source": meta.get("source", ""), "score": score})
+        return sorted(chunks, key=lambda x: x["score"], reverse=True)
 
     def _build_context(self, sources: List[Dict]) -> str:
         parts, total = [], 0
@@ -278,39 +205,31 @@ class RAGEngine:
         return "\n\n---\n\n".join(parts)
 
     def _generate(self, question: str, context: str, history: List[Dict]) -> str:
-        import torch
-        messages = [{"role": "system", "content": SYSTEM_PROMPT.format(context=context)}]
-        for turn in history[-10:]:
-            messages.append({"role": turn["role"], "content": turn["content"]})
-        messages.append({"role": "user", "content": question})
-
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.tokenizer(
-            text, return_tensors="pt", truncation=True, max_length=4096
-        ).to(self.llm.device)
-
-        with torch.no_grad():
-            out = self.llm.generate(
-                **inputs,
-                max_new_tokens=512,
-                temperature=0.1,
-                do_sample=False,
-                pad_token_id=self.tokenizer.eos_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-                repetition_penalty=1.1,
+        if not self._api_key:
+            return (
+                "⚠️ يرجى إضافة GROQ_API_KEY في Secrets الخاصة بالتطبيق.\n\n"
+                "احصل على مفتاح مجاني من: https://console.groq.com"
             )
 
-        gen = out[0][inputs["input_ids"].shape[1]:]
-        return self.tokenizer.decode(gen, skip_special_tokens=True).strip()
+        from groq import Groq
+        client = Groq(api_key=self._api_key)
 
-    # ── Ingestion ─────────────────────────────────────────────────────────────
+        messages = [{"role": "system", "content": SYSTEM_PROMPT.format(context=context)}]
+        for turn in history[-6:]:
+            role = "user" if turn["role"] == "user" else "assistant"
+            messages.append({"role": role, "content": turn["content"]})
+        messages.append({"role": "user", "content": question})
+
+        response = client.chat.completions.create(
+            model=self.groq_model,
+            messages=messages,
+            max_tokens=1024,
+            temperature=0.1,
+        )
+        return response.choices[0].message.content.strip()
 
     def ingest_file(self, file_path: str) -> int:
         ext = Path(file_path).suffix.lower()
-        name = Path(file_path).name
-
         if ext == ".pdf":
             text = self._extract_pdf(file_path)
         elif ext in {".txt", ".md"}:
@@ -318,9 +237,8 @@ class RAGEngine:
         else:
             raise ValueError(f"Unsupported: {ext}")
 
-        title = Path(file_path).stem
-        chunker = TextChunker(chunk_size=700, overlap=80)
-        chunks = chunker.split(text, {"source": name, "title": title})
+        chunker = TextChunker(chunk_size=700)
+        chunks = chunker.split(text, {"source": Path(file_path).name, "title": Path(file_path).stem})
         if not chunks:
             return 0
 
@@ -328,7 +246,6 @@ class RAGEngine:
         embeddings = self.embedder.encode(
             texts, batch_size=16, normalize_embeddings=True, show_progress_bar=False
         ).tolist()
-
         self.vector_store.upsert(
             ids=[c["id"] for c in chunks],
             embeddings=embeddings,
@@ -338,17 +255,14 @@ class RAGEngine:
         return len(chunks)
 
     def _extract_pdf(self, path: str) -> str:
-        try:
-            import pdfplumber
-            pages = []
-            with pdfplumber.open(path) as pdf:
-                for page in pdf.pages:
-                    t = page.extract_text()
-                    if t:
-                        pages.append(t.strip())
-            return "\n\n".join(pages)
-        except ImportError:
-            raise ImportError("Install pdfplumber: pip install pdfplumber")
+        import pdfplumber
+        pages = []
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    pages.append(t.strip())
+        return "\n\n".join(pages)
 
     def _detect_intent(self, question: str) -> str:
         q = question.lower()
@@ -360,14 +274,13 @@ class RAGEngine:
     def get_stats(self) -> Dict:
         return {
             "total_chunks": self.vector_store.count() if self.vector_store else 0,
-            "embedding_model": "intfloat/multilingual-e5-large",
-            "llm_model": self.model_name,
-            "use_4bit": self.use_4bit,
-            "use_cpu": self.use_cpu,
+            "embedding_model": "intfloat/multilingual-e5-small",
+            "llm_model": f"Groq / {self.groq_model}",
+            "use_4bit": False,
+            "use_cpu": True,
         }
 
     def reset_knowledge_base(self):
-        self._chroma.delete_collection("uniq_bylaws")
+        self._chroma.delete_collection("uniq_bylaws_v2")
         self.vector_store = self._chroma.get_or_create_collection(
-            name="uniq_bylaws", metadata={"hnsw:space": "cosine"}
-        )
+            name="uniq_bylaws_v2", metadata={"hnsw:space": "cosine"})
